@@ -1,0 +1,13 @@
+# Ignore datasets
+/nih_data/
+
+# Ignore Python virtual environments
+/venv/
+/.venv/
+/apex_env/
+
+# Ignore model outputs and logs
+/models/old_models/
+/**/wandb/
+/**/__pycache__/
+.DS_Store
