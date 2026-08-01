@@ -21,7 +21,7 @@ CONFIG = {
     "learning_rate": 0.00005,
     "epochs": 25,
     "num_workers": 2,
-    "device": "cuda",
+    "device" : "cuda",
     "data_dir": None,
     "wandb_project": "X-Ray Classification",
     "patience": 5,
