@@ -17,10 +17,10 @@ import time
 
 CONFIG = {
     "model": "dannynet",
-    "batch_size": 8,
-    "learning_rate": 0.00005,
+    "batch_size": 64,
+    "learning_rate": 0.0001,
     "epochs": 25,
-    "num_workers": 2,
+    "num_workers": 4,
     "device" : "cuda",
     "data_dir": None,
     "wandb_project": "X-Ray Classification",
@@ -269,9 +269,9 @@ def main():
     val_dataset = CheXNetDataset(val_df, image_to_folder, transform=transform_test)
     test_dataset = CheXNetDataset(test_df, image_to_folder, transform=transform_test)
 
-    trainloader = DataLoader(train_dataset, batch_size=CONFIG["batch_size"], shuffle=True, num_workers=CONFIG["num_workers"])
-    valloader = DataLoader(val_dataset, batch_size=CONFIG["batch_size"], shuffle=False, num_workers=CONFIG["num_workers"])
-    testloader = DataLoader(test_dataset, batch_size=CONFIG["batch_size"], shuffle=False, num_workers=CONFIG["num_workers"])
+    trainloader = DataLoader(train_dataset, batch_size=CONFIG["batch_size"], shuffle=True, num_workers=CONFIG["num_workers"], pin_memory=True, persistent_workers=True)
+    valloader = DataLoader(val_dataset, batch_size=CONFIG["batch_size"], shuffle=False, num_workers=CONFIG["num_workers"], pin_memory=True, persistent_workers=True)
+    testloader = DataLoader(test_dataset, batch_size=CONFIG["batch_size"], shuffle=False, num_workers=CONFIG["num_workers"], pin_memory=True, persistent_workers=True)
 
     # Training loop with WandB and timestamped checkpoints
     wandb.init(project=CONFIG["wandb_project"], config=CONFIG)
