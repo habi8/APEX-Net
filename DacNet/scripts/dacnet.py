@@ -21,7 +21,7 @@ CONFIG = {
     "learning_rate": 0.00005,
     "epochs": 25,
     "num_workers": 2,
-    "device": "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu",
+    "device": "cuda",
     "data_dir": None,
     "wandb_project": "X-Ray Classification",
     "patience": 5,
@@ -232,7 +232,10 @@ def main():
     df = pd.read_csv(csv_file)
 
     # Get list of all image folders from images_001 to images_012
-    image_folders = [os.path.join(data_path, "images_001", "images")]
+    image_folders = [ 
+        os.path.join(data_path, f"images_{str(i).zfill(3)}", "images")
+         for i in range(1, 13)
+         ]
     # Create a dictionary mapping image filenames to their folder paths
     image_to_folder = {}
     for folder in image_folders:
