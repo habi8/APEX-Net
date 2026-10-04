@@ -20,6 +20,7 @@ __pycache__/
 # Checkpoints and training output
 /models/
 /scripts/models/
+/prior_maps/
 *.pth
 *.pt
 *.ckpt

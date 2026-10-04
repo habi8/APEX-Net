@@ -1,3 +1,5 @@
+activate venv : ..\..\apex_env\Scripts\Activate.ps1  
+training script : python scripts/dacnet_fzlpr.py --data_dir C:\NIH_data --tau 0.2
 test one image :  python scripts\Predict.py --image test-images\hernia-infiltration.png --checkpoint models\yyc9g0js\best_model_20260802-061232.pth --device cpu
 evaluation script : python scripts\evaluate_checkpoint.py --data_dir "PATH_TO_NIH_DATA" --checkpoint models\yyc9g0js\best_model_20260802-061232.pth --device cpu
 

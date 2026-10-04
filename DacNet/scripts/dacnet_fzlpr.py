@@ -1,4 +1,6 @@
-import os, argparse, time
+import os
+import argparse
+import time
 import pandas as pd
 import numpy as np
 from PIL import Image
@@ -21,8 +23,8 @@ CONFIG = {
     "batch_size": 16,
     "learning_rate": 0.00005,
     "epochs": 25,
-    "num_workers": 2,
-    "device": cuda",
+    "num_workers": 4,
+    "device": "cuda",
     "data_dir": None,
     "wandb_project": "X-Ray Classification",
     "patience": 5,
@@ -96,92 +98,9 @@ def parse_args():
                         help="FZLPR temperature (Paper 1)")
     parser.add_argument("--no_tta", action="store_true",
                         help="Disable test-time augmentation")
+    parser.add_argument("--num_workers", type=int, default=CONFIG["num_workers"],
+                        help="Number of DataLoader worker processes")
     return parser.parse_args()
-
-args = parse_args()
-CONFIG["data_dir"] = args.data_dir
-CONFIG["tau"] = args.tau
-if args.no_tta:
-    CONFIG["use_tta"] = False
-
-# ─────────────────────────────────────────────────────────────────────
-# TRANSFORMS (DACNet augmentations + resize strategy)
-# ─────────────────────────────────────────────────────────────────────
-transform_train = transforms.Compose([
-    transforms.RandomResizedCrop(224),
-    transforms.RandomHorizontalFlip(),
-    transforms.ColorJitter(brightness=0.1, contrast=0.1),
-    transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-])
-
-transform_test = transforms.Compose([
-    transforms.Resize(256),
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-])
-
-# ─────────────────────────────────────────────────────────────────────
-# MODEL (DenseNet121 + Paper 1 custom top network — simplified version)
-# ─────────────────────────────────────────────────────────────────────
-model = densenet121(weights=DenseNet121_Weights.IMAGENET1K_V1)
-num_features = model.classifier.in_features
-
-# Paper 1-style custom top (simplified: dropout + intermediate dense + BatchNorm)
-model.classifier = nn.Sequential(
-    nn.Dropout(0.1),
-    nn.Linear(num_features, 64),
-    nn.BatchNorm1d(64),
-    nn.ReLU(inplace=True),
-    nn.Linear(64, 14),
-    nn.BatchNorm1d(14)
-)
-model = model.to(CONFIG["device"])
-
-# ─────────────────────────────────────────────────────────────────────
-# LOSS, OPTIMIZER, SCHEDULER
-# ─────────────────────────────────────────────────────────────────────
-criterion = FZLPRLoss(tau=CONFIG["tau"])
-optimizer = torch.optim.AdamW(
-    model.parameters(),
-    lr=CONFIG["learning_rate"],
-    weight_decay=1e-5
-)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, 'min', patience=1, factor=0.1
-)
-
-# ─────────────────────────────────────────────────────────────────────
-# DATA LOADING
-# ─────────────────────────────────────────────────────────────────────
-data_path = os.path.abspath(CONFIG["data_dir"])
-csv_file = os.path.join(data_path, "Data_Entry_2017.csv")
-df = pd.read_csv(csv_file)
-
-image_folders = [
-    os.path.join(data_path, f"images_{str(i).zfill(3)}", "images")
-    for i in range(1, 13)
-]
-image_to_folder = {}
-for folder in image_folders:
-    if os.path.exists(folder):
-        for img_file in os.listdir(folder):
-            if img_file.endswith('.png'):
-                image_to_folder[img_file] = folder
-
-df = df[df['Image Index'].isin(image_to_folder.keys())]
-
-unique_patients = df['Patient ID'].unique()
-train_val_patients, test_patients = train_test_split(
-    unique_patients, test_size=0.02, random_state=CONFIG["seed"]
-)
-train_patients, val_patients = train_test_split(
-    train_val_patients, test_size=0.052, random_state=CONFIG["seed"]
-)
-train_df = df[df['Patient ID'].isin(train_patients)]
-val_df = df[df['Patient ID'].isin(val_patients)]
-test_df = df[df['Patient ID'].isin(test_patients)]
 
 disease_list = [
     'Atelectasis', 'Cardiomegaly', 'Consolidation', 'Edema',
@@ -215,23 +134,6 @@ class CheXNetDataset(Dataset):
         label_vector = get_label_vector(labels_str)
         labels = torch.tensor(label_vector, dtype=torch.float)
         return image, labels
-
-train_dataset = CheXNetDataset(train_df, image_to_folder, transform_train)
-val_dataset = CheXNetDataset(val_df, image_to_folder, transform_test)
-test_dataset = CheXNetDataset(test_df, image_to_folder, transform_test)
-
-trainloader = DataLoader(
-    train_dataset, batch_size=CONFIG["batch_size"], shuffle=True,
-    num_workers=CONFIG["num_workers"]
-)
-valloader = DataLoader(
-    val_dataset, batch_size=CONFIG["batch_size"], shuffle=False,
-    num_workers=CONFIG["num_workers"]
-)
-testloader = DataLoader(
-    test_dataset, batch_size=CONFIG["batch_size"], shuffle=False,
-    num_workers=CONFIG["num_workers"]
-)
 
 # ─────────────────────────────────────────────────────────────────────
 # THRESHOLD OPTIMIZATION (DACNet feature)
@@ -325,76 +227,179 @@ def train(epoch, model, trainloader, optimizer, criterion, CONFIG):
 def validate(model, valloader, criterion, device):
     return evaluate(model, valloader, criterion, device, desc="[Validate]")
 
-# ─────────────────────────────────────────────────────────────────────
-# TRAINING LOOP
-# ─────────────────────────────────────────────────────────────────────
-wandb.init(project=CONFIG["wandb_project"], config=CONFIG)
-wandb.watch(model, log="all")
-wandb.config.update({
-    "model_architecture": "DenseNet121",
-    "loss_fn": "FZLPRLoss",
-    "tau": CONFIG["tau"],
-    "optimizer": "AdamW",
-    "scheduler": "ReduceLROnPlateau",
-    "augmentation": "RandomResizedCrop + ColorJitter + HorizontalFlip",
-    "use_tta": CONFIG["use_tta"],
-    "custom_top": "Dropout + Dense(64) + BN",
-})
+def main():
+    args = parse_args()
+    CONFIG["data_dir"] = args.data_dir
+    CONFIG["tau"] = args.tau
+    CONFIG["num_workers"] = args.num_workers
+    if args.no_tta:
+        CONFIG["use_tta"] = False
 
-run_id = wandb.run.id
-checkpoint_dir = os.path.join("models", run_id)
-os.makedirs(checkpoint_dir, exist_ok=True)
+    device = torch.device(CONFIG["device"])
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA is configured but is not available")
 
-best_val_auc = 0.0
-patience_counter = 0
+    transform_train = transforms.Compose([
+        transforms.RandomResizedCrop(224),
+        transforms.RandomHorizontalFlip(),
+        transforms.ColorJitter(brightness=0.1, contrast=0.1),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+    transform_test = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
 
-for epoch in range(CONFIG["epochs"]):
-    train_loss = train(epoch, model, trainloader, optimizer, criterion, CONFIG)
-    val_stats = validate(model, valloader, criterion, CONFIG["device"])
-    scheduler.step(val_stats["loss"])
+    model = densenet121(weights=DenseNet121_Weights.IMAGENET1K_V1)
+    num_features = model.classifier.in_features
+    model.classifier = nn.Sequential(
+        nn.Dropout(0.1),
+        nn.Linear(num_features, 64),
+        nn.BatchNorm1d(64),
+        nn.ReLU(inplace=True),
+        nn.Linear(64, 14),
+        nn.BatchNorm1d(14),
+    )
+    model = model.to(device)
 
-    wandb.log({
-        "epoch": epoch + 1,
-        "train_loss": train_loss,
-        "val_loss": val_stats["loss"],
-        "val_auc": val_stats["avg_auc"],
-        "val_f1": val_stats["avg_f1"],
-        "f1_dict": val_stats["f1_dict"],
-        "auc_dict": val_stats["auc_dict"],
-        "optimal_thresholds": val_stats["thresholds"],
+    criterion = FZLPRLoss(tau=CONFIG["tau"])
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=CONFIG["learning_rate"], weight_decay=1e-5
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, "min", patience=1, factor=0.1
+    )
+
+    data_path = os.path.abspath(CONFIG["data_dir"])
+    csv_file = os.path.join(data_path, "Data_Entry_2017.csv")
+    if not os.path.isfile(csv_file):
+        raise FileNotFoundError(f"Metadata file not found: {csv_file}")
+    df = pd.read_csv(csv_file)
+
+    image_folders = [
+        os.path.join(data_path, f"images_{index:03d}", "images")
+        for index in range(1, 13)
+    ]
+    image_to_folder = {}
+    for folder in image_folders:
+        if os.path.isdir(folder):
+            for img_file in os.listdir(folder):
+                if img_file.endswith(".png"):
+                    image_to_folder[img_file] = folder
+    df = df[df["Image Index"].isin(image_to_folder)].copy()
+    if df.empty:
+        raise ValueError(f"No dataset images found under: {data_path}")
+
+    unique_patients = df["Patient ID"].unique()
+    train_val_patients, test_patients = train_test_split(
+        unique_patients, test_size=0.02, random_state=CONFIG["seed"]
+    )
+    train_patients, val_patients = train_test_split(
+        train_val_patients, test_size=0.052, random_state=CONFIG["seed"]
+    )
+    train_df = df[df["Patient ID"].isin(train_patients)]
+    val_df = df[df["Patient ID"].isin(val_patients)]
+    test_df = df[df["Patient ID"].isin(test_patients)]
+
+    train_dataset = CheXNetDataset(train_df, image_to_folder, transform_train)
+    val_dataset = CheXNetDataset(val_df, image_to_folder, transform_test)
+    test_dataset = CheXNetDataset(test_df, image_to_folder, transform_test)
+    loader_options = {
+        "batch_size": CONFIG["batch_size"],
+        "num_workers": CONFIG["num_workers"],
+        "pin_memory": device.type == "cuda",
+    }
+    trainloader = DataLoader(
+        train_dataset,
+        shuffle=True,
+        persistent_workers=CONFIG["num_workers"] > 0,
+        **loader_options,
+    )
+    valloader = DataLoader(val_dataset, shuffle=False, **loader_options)
+    testloader = DataLoader(test_dataset, shuffle=False, **loader_options)
+
+    wandb.init(project=CONFIG["wandb_project"], config=CONFIG)
+    wandb.watch(model, log="all")
+    wandb.config.update({
+        "model_architecture": "DenseNet121",
+        "loss_fn": "FZLPRLoss",
+        "tau": CONFIG["tau"],
+        "optimizer": "AdamW",
+        "scheduler": "ReduceLROnPlateau",
+        "augmentation": "RandomResizedCrop + ColorJitter + HorizontalFlip",
+        "use_tta": CONFIG["use_tta"],
+        "custom_top": "Dropout + Dense(64) + BN",
     })
 
-    if val_stats["avg_auc"] > best_val_auc:
-        best_val_auc = val_stats["avg_auc"]
-        patience_counter = 0
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        checkpoint_path = os.path.join(checkpoint_dir, f"best_model_{timestamp}.pth")
-        torch.save(model.state_dict(), checkpoint_path)
-        wandb.save(checkpoint_path)
-    else:
-        patience_counter += 1
-        if patience_counter >= CONFIG["patience"]:
-            print("Early stopping triggered.")
-            break
+    run_id = wandb.run.id
+    checkpoint_dir = os.path.join("models", run_id)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    best_val_auc = 0.0
+    patience_counter = 0
 
-# ─────────────────────────────────────────────────────────────────────
-# FINAL TEST EVALUATION
-# ─────────────────────────────────────────────────────────────────────
-best_checkpoint_path = sorted([
-    os.path.join(checkpoint_dir, f) for f in os.listdir(checkpoint_dir)
-    if f.startswith('best_model_')
-])[-1]
-model.load_state_dict(torch.load(best_checkpoint_path))
+    try:
+        for epoch in range(CONFIG["epochs"]):
+            train_loss = train(epoch, model, trainloader, optimizer, criterion, CONFIG)
+            val_stats = validate(model, valloader, criterion, device)
+            scheduler.step(val_stats["loss"])
 
-test_stats = evaluate(
-    model, testloader, criterion, CONFIG["device"],
-    desc="[Test]", use_tta=CONFIG["use_tta"]
-)
-wandb.log({
-    "test_loss": test_stats["loss"],
-    "test_auc": test_stats["avg_auc"],
-    "test_f1": test_stats["avg_f1"],
-    "test_auc_dict": test_stats["auc_dict"],
-    "test_f1_dict": test_stats["f1_dict"],
-})
-wandb.finish()
+            wandb.log({
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "val_loss": val_stats["loss"],
+                "val_auc": val_stats["avg_auc"],
+                "val_f1": val_stats["avg_f1"],
+                "f1_dict": val_stats["f1_dict"],
+                "auc_dict": val_stats["auc_dict"],
+                "optimal_thresholds": val_stats["thresholds"],
+            })
+
+            if val_stats["avg_auc"] > best_val_auc:
+                best_val_auc = val_stats["avg_auc"]
+                patience_counter = 0
+                timestamp = time.strftime("%Y%m%d-%H%M%S")
+                checkpoint_path = os.path.join(
+                    checkpoint_dir, f"best_model_{timestamp}.pth"
+                )
+                torch.save(model.state_dict(), checkpoint_path)
+                wandb.save(checkpoint_path)
+            else:
+                patience_counter += 1
+                if patience_counter >= CONFIG["patience"]:
+                    print("Early stopping triggered.")
+                    break
+
+        checkpoint_files = [
+            os.path.join(checkpoint_dir, filename)
+            for filename in os.listdir(checkpoint_dir)
+            if filename.startswith("best_model_")
+        ]
+        if not checkpoint_files:
+            raise RuntimeError("Training ended without saving a model checkpoint")
+
+        best_checkpoint_path = max(checkpoint_files, key=os.path.getmtime)
+        model.load_state_dict(torch.load(best_checkpoint_path, map_location=device))
+        test_stats = evaluate(
+            model,
+            testloader,
+            criterion,
+            device,
+            desc="[Test]",
+            use_tta=CONFIG["use_tta"],
+        )
+        wandb.log({
+            "test_loss": test_stats["loss"],
+            "test_auc": test_stats["avg_auc"],
+            "test_f1": test_stats["avg_f1"],
+            "test_auc_dict": test_stats["auc_dict"],
+            "test_f1_dict": test_stats["f1_dict"],
+        })
+    finally:
+        wandb.finish()
+
+
+if __name__ == "__main__":
+    main()
