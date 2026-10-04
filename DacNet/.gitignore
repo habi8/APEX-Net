@@ -18,8 +18,7 @@ __pycache__/
 /Data_Entry_2017.csv
 
 # Checkpoints and training output
-/models/
-/scripts/models/
+/scripts/
 /prior_maps/
 *.pth
 *.pt
