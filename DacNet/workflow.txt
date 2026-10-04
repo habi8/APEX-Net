@@ -1,0 +1,67 @@
+APEX-Net / DACNet workflow summary
+==================================
+
+Lung ROI script
+---------------
+Script: scripts/lung_roi.py
+
+This is the new, separate lung-segmentation workflow. It trains a custom U-Net
+on the JSRT X-rays and masks, then uses that checkpoint to create a lung mask
+for every NIH image. Post-processing keeps up to two largest connected
+components, fills their convex hulls, and dilates the result.
+
+Current defaults are configured in DEFAULT_CONFIG in scripts/lung_roi.py:
+  JSRT images: C:\JSRT\jsrt\cxr
+  JSRT masks:  C:\JSRT\jsrt\masks
+  NIH images:  C:\NIH_data
+  device:      cuda
+  U-Net weights: models\lung_unet.pth
+
+From the DacNet project directory:
+  python scripts\lung_roi.py train
+  python scripts\lung_roi.py generate
+
+The generated NIH masks go under C:\NIH_data\lung_masks and keep the original
+image dimensions and relative folders. The classifier scripts do not consume
+these ROI masks automatically; they are currently standalone preprocessing
+outputs.
+
+Classification models
+---------------------
+Basic DACNet: scripts/dacnet.py
+
+This trains a DenseNet-121 classifier for the 14 NIH ChestX-ray14 findings.
+It uses a focal loss to emphasize harder examples, which is intended to help
+with class imbalance. Its best checkpoint is saved as:
+  models\<Weights & Biases run ID>\best_model_<timestamp>.pth
+
+FZLPR-DACNet: scripts/dacnet_fzlpr.py
+
+This is the FZLPR version of the DenseNet-121, 14-label classifier. It uses
+FZLPR loss (with configurable temperature tau) and supports test-time
+augmentation (horizontal flip and zoom) when evaluating. Its best checkpoint
+is saved in the same run-specific location:
+  models\<Weights & Biases run ID>\best_model_<timestamp>.pth
+
+These classification checkpoints are independent of the U-Net checkpoint.
+Training the U-Net neither loads nor overwrites the DACNet weights.
+
+Prior maps
+----------
+Script: scripts/generate_prior_maps.py
+
+This reads NIH bounding-box annotations from BBox_List_2017.csv and creates
+one disease-specific spatial prior map per finding as a .npy file. Annotated
+findings are built from the bounding boxes; unannotated findings get an
+all-ones map. By default maps are saved under:
+  DacNet\prior_maps\
+
+Example:
+  python scripts\generate_prior_maps.py --data_dir C:\NIH_data
+
+The prior-map generator is also a separate preprocessing step; generating the
+files alone does not automatically apply them in classifier training.
+
+Previously available classifier checkpoints are not moved by these workflows.
+Check the models directory for the actual run ID and timestamp of each saved
+classification checkpoint.

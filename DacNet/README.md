@@ -77,6 +77,35 @@ If your dataset is stored elsewhere, update the path in the scripts:
 CONFIG["data_dir"] = "/path/to/your/data"
 ```
 
+## Lung ROI Masks
+
+`scripts/lung_roi.py` provides a custom U-Net training workflow for JSRT and a
+separate preprocessing command to save one post-processed lung mask per NIH
+image. No pretrained weights are bundled or downloaded automatically.
+
+Prepare paired JSRT data with images and masks in separate directories. Masks
+may be a single binary image with the same filename stem as its X-ray, or
+separate left/right masks named `<image-stem>_L` and `<image-stem>_R` (either
+side may be absent). Foreground mask pixels must be nonzero. Then train:
+
+```bash
+python scripts/lung_roi.py train --images_dir /path/to/JSRT/images --masks_dir /path/to/JSRT/masks --output models/lung_unet.pth
+```
+
+Precompute NIH masks using that checkpoint:
+
+```bash
+python scripts/lung_roi.py generate --data_dir /path/to/NIH_data --checkpoint models/lung_unet.pth
+```
+
+Masks are saved as 8-bit PNGs under `<data_dir>/lung_masks`, preserving each
+image's relative directory and original dimensions. The default post-processing
+keeps up to two largest connected components, fills their convex hulls, and
+dilates the result by five pixels. Use `--output_dir`, `--threshold`, and
+`--dilation_radius` to adjust generation. ROI extraction is currently a
+standalone preprocessing step; the classification scripts do not apply masks
+automatically.
+
 ---
 
 ## Reproducible Environment (Docker)
@@ -272,6 +301,5 @@ https://arxiv.org/abs/2505.06646
 Rajpurkar et al.  
 CheXNet: Radiologist-Level Pneumonia Detection on Chest X-Rays with Deep Learning  
 https://arxiv.org/abs/1711.05225
-
 
 
