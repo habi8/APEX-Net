@@ -34,6 +34,8 @@ This trains a DenseNet-121 classifier for the 14 NIH ChestX-ray14 findings.
 It uses a focal loss to emphasize harder examples, which is intended to help
 with class imbalance. Its best checkpoint is saved as:
   models\<Weights & Biases run ID>\best_model_<timestamp>.pth
+The latest completed focal-loss checkpoint currently in the repository is:
+  models\yyc9g0js\best_model_20260802-061232.pth
 
 FZLPR-DACNet: scripts/dacnet_fzlpr.py
 
