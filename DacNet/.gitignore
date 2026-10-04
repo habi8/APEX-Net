@@ -1,13 +1,36 @@
-# Ignore datasets
-/nih_data/
-
-# Ignore Python virtual environments
+# Python environments and caches
 /venv/
 /.venv/
+/env/
 /apex_env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# Ignore model outputs and logs
-/models/old_models/
-/**/wandb/
-/**/__pycache__/
+# Local datasets
+/nih_data/
+/data/
+/datasets/
+/images_*/
+/Data_Entry_2017.csv
+
+# Checkpoints and training output
+/models/
+/scripts/models/
+*.pth
+*.pt
+*.ckpt
+*.onnx
+/wandb/
+wandb/
+*.log
+
+# Notebook and local files
+.ipynb_checkpoints/
+.env
 .DS_Store
+Thumbs.db
+*.whl
