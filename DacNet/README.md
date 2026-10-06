@@ -8,6 +8,66 @@ It also includes a Vision Transformer baseline and a Streamlit demo for inferenc
 
 ---
 
+## Deploying the APEX-Net API when Hugging Face Spaces are Static-only
+
+A Hugging Face **Static** Space serves static files; it cannot run this FastAPI
+application, load the PyTorch checkpoints, or provide the `/predict` endpoint.
+The backend needs PyTorch, a DenseNet-based classifier, a U-Net, and both model
+checkpoints in memory. Render's 512 MB free web-service instance is not a
+realistic fit for this workload and is likely to run out of memory. Keep the
+frontend on its existing host and deploy the API separately on a service with
+sufficient RAM, or redesign and benchmark the inference stack for a smaller
+runtime. A paid Render service is one possible host; check its current
+[compute plans](https://render.com/docs/compute-plans) and available memory
+before choosing a plan.
+
+### Deploy the API to a paid Render Web Service
+
+1. Push the backend changes to the GitHub repository containing `DacNet/`.
+   Create a **Web Service** on Render and connect that repository. Choose a
+   paid plan with enough RAM for PyTorch import, both models, and inference;
+   do not use the 512 MB free plan for this API.
+2. Set the service's **Root Directory** to `DacNet`.
+3. Choose the **Python 3.10** runtime. Use these commands:
+
+   **Build command**
+
+   ```bash
+   pip install --index-url https://download.pytorch.org/whl/cpu torch==2.5.1 torchvision==0.20.1 && pip install -r api-requirements.txt
+   ```
+
+   **Start command**
+
+   ```bash
+   uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+   ```
+
+4. In the service's environment settings, add `APEX_API_KEY` with a long
+   random secret value. Do not commit this value or put it in frontend code.
+5. Deploy. Once the service is live, check `https://<render-service>.onrender.com/health`
+   and wait for `"status": "ok"`. The API endpoint is
+   `https://<render-service>.onrender.com/predict`.
+6. In the **server-side environment settings** of the existing frontend host,
+   set `APEX_BACKEND_URL` to the Render service URL (without `/predict`) and
+   `APEX_BACKEND_API_KEY` to the same secret as `APEX_API_KEY`. Redeploy the
+   frontend after setting them. The current Next.js `/api/predict` route
+   forwards the request server-to-server, so the browser does not need direct
+   access to the backend.
+
+Check the selected plan's current RAM, CPU, and cost before deploying. Monitor
+the first model load and inference for memory use; upgrade the plan if the
+service runs out of memory. See
+[Render's FastAPI deployment guide](https://render.com/docs/deploy-fastapi).
+
+If the frontend itself is deployed as a **Hugging Face Static Space**, note
+that its Next.js server route (`/api/predict`) is not served by a static host.
+In that case, deploy the Next.js app to a host that supports server-side
+routes, or separately change the frontend to call the backend directly and
+configure backend CORS for the frontend origin. Do not expose the API key in
+browser JavaScript.
+
+---
+
 ## Reproduction Scope
 
 This work reproduces key components of:
