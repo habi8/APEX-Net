@@ -103,8 +103,62 @@ image's relative directory and original dimensions. The default post-processing
 keeps up to two largest connected components, fills their convex hulls, and
 dilates the result by five pixels. Use `--output_dir`, `--threshold`, and
 `--dilation_radius` to adjust generation. ROI extraction is currently a
-standalone preprocessing step; the classification scripts do not apply masks
-automatically.
+standalone preprocessing step; the existing classification training scripts
+do not load masks automatically.
+
+## APEX-Net APAM Classifier
+
+`models/apam.py` provides an APAM block and an `APEXNet` DenseNet-121
+classifier. The model takes images, lung ROI masks, and disease-specific prior
+maps as separate inputs and returns 14 raw logits by default. Resize the maps
+from the preprocessing workflows to the image dimensions before batching; the
+model resizes them again to the DenseNet feature-map resolution. Example:
+
+```python
+from models.apam import APEXNet
+
+model = APEXNet(pretrained=True)
+logits = model(images, lung_masks, disease_prior_maps)
+```
+
+The input shapes are `[B, 3, H, W]` for images, `[B, 1, H, W]` for lung
+masks, and `[B, 14, H, W]` for disease prior maps, ordered like the NIH
+findings list. The APEX-Net training script loads the generated lung mask matching each
+image's relative path and the 14 shared prior maps. It applies the same random
+crop and horizontal flip to the image, ROI mask, and prior maps, while applying
+ColorJitter to the image only.
+
+Generate the precomputed inputs (skip generation if they already exist):
+
+```powershell
+python scripts\lung_roi.py generate --data_dir C:\NIH_data --checkpoint models\lung_unet.pth
+python scripts\generate_prior_maps.py --data_dir C:\NIH_data
+```
+
+Then train from the `DacNet` project directory:
+
+```powershell
+python scripts\train_apexnet.py --data_dir C:\NIH_data
+```
+
+Run the trained APEX-Net checkpoint on one image:
+
+```powershell
+python scripts\predict_apexnet.py --image "C:\path\to\chest-xray.png"
+```
+
+The predictor defaults to the latest APEX-Net checkpoint and generates a lung
+mask with `models\lung_unet.pth`. To reuse a precomputed mask, pass
+`--lung_mask "C:\path\to\lung-mask.png"`. Scores are sigmoid probabilities;
+they are not clinical diagnoses.
+
+By default, the trainer checks both `<data_dir>\lung_masks` and the project
+`lung_masks\` directory, and selects the location containing the most matching
+image masks. Prior maps are read from `prior_maps\`. Training uses
+ImageNet-pretrained DenseNet-121 weights, AdamW, and the DACNet-style
+focal-loss loop. Use `--lung_mask_dir` and `--prior_map_dir` to explicitly
+select other locations. Use `--no_pretrained` if pretrained weights are not
+available locally and should not be downloaded.
 
 ---
 
@@ -301,5 +355,3 @@ https://arxiv.org/abs/2505.06646
 Rajpurkar et al.  
 CheXNet: Radiologist-Level Pneumonia Detection on Chest X-Rays with Deep Learning  
 https://arxiv.org/abs/1711.05225
-
-

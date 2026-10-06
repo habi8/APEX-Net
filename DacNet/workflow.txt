@@ -22,9 +22,8 @@ From the DacNet project directory:
   python scripts\lung_roi.py generate
 
 The generated NIH masks go under C:\NIH_data\lung_masks and keep the original
-image dimensions and relative folders. The classifier scripts do not consume
-these ROI masks automatically; they are currently standalone preprocessing
-outputs.
+image dimensions and relative folders. DACNet and FZLPR-DACNet do not consume
+these masks; APEX-Net uses them during training.
 
 Classification models
 ---------------------
@@ -62,7 +61,28 @@ Example:
   python scripts\generate_prior_maps.py --data_dir C:\NIH_data
 
 The prior-map generator is also a separate preprocessing step; generating the
-files alone does not automatically apply them in classifier training.
+files alone does not apply them to DACNet or FZLPR-DACNet.
+
+APEX-Net with APAM
+------------------
+Script: scripts/train_apexnet.py
+
+APEX-Net starts with a pretrained DenseNet-121 and trains it with two spatial
+cues: the lung ROI mask identifies where the lungs are, and each disease prior
+map provides a rough class-specific location bias. APAM pools feature
+descriptors from the full image and the masked region, then learns channel
+weights to combine them. Each disease gets separate lung-mask and prior-map
+attention branches before its classifier. This guides existing image features
+toward relevant anatomy without replacing the image or serving as a disease
+label. Priors are dataset-level maps, not per-image lesion annotations;
+unannotated diseases have all-ones priors and therefore get no spatial
+filtering from that branch.
+
+Train from the DacNet project directory after generating the masks and priors:
+  python scripts\train_apexnet.py --data_dir C:\NIH_data
+
+The trainer applies matching crops/flips to each image and its masks/priors.
+Its APEX-Net checkpoint is separate from DACNet and U-Net checkpoints.
 
 Previously available classifier checkpoints are not moved by these workflows.
 Check the models directory for the actual run ID and timestamp of each saved
