@@ -24,6 +24,10 @@ __pycache__/
 *.pt
 *.ckpt
 *.onnx
+!/models/**/*.pth
+!/models/**/*.pt
+!/models/**/*.ckpt
+!/models/**/*.onnx
 /wandb/
 wandb/
 *.log
