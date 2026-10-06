@@ -1,0 +1,82 @@
+APEX-Net local frontend/backend integration
+============================================
+
+Frontend
+--------
+Project: APEX-Net-frontend\apex-net-frontend
+The frontend uploads the selected file to its existing /api/upload route, then
+posts the original file and upload ID to its authenticated /api/predict route.
+That Next.js route proxies the file to the APEX-Net Python service. The browser
+does not receive an API secret.
+
+Backend
+-------
+Project: APEX-Net\DacNet
+API module: backend\main.py
+POST /predict: multipart fields "file" and optional "heatmap_count" (1..5)
+GET  /health: readiness check (all model assets must have loaded)
+The returned finding scores cover all 14 classes. Heatmaps are generated for
+the top three classes by default and returned as lossless WebP data URLs.
+
+Local setup (PowerShell)
+------------------------
+1. Start the inference API in one terminal:
+
+   cd E:\Projects\APEX-Net\APEX-Net\DacNet
+   .\venv\Scripts\Activate.ps1
+   pip install -r api-requirements.txt
+   $env:APEX_DEVICE = "cuda"
+   uvicorn backend.main:app --host 127.0.0.1 --port 8000
+
+   Use "cpu" instead of "cuda" if CUDA is unavailable. The default checkpoint
+   is models\ngp6gwkn\best_model_20261006-050300.pth; the default lung model is
+   models\lung_unet.pth; the default priors directory is prior_maps.
+   Override them using APEX_CHECKPOINT, LUNG_CHECKPOINT and PRIOR_MAP_DIR.
+
+2. Verify the backend:
+
+   Invoke-RestMethod http://127.0.0.1:8000/health
+
+3. Start the Next.js frontend in a second terminal:
+
+   cd E:\Projects\APEX-Net\APEX-Net-frontend\apex-net-frontend
+   npm run dev
+
+   The frontend proxy defaults to http://127.0.0.1:8000. To use another local
+   backend address, set APEX_BACKEND_URL in the frontend server environment.
+   Supabase auth and the existing upload/history schema remain in use.
+
+Deployment changes
+------------------
+1. Deploy the Python API separately from Vercel (for example, Cloud Run).
+   Build from the DacNet directory using Dockerfile.api. It includes the API
+   code, model architecture and lung ROI code, the best APEX-Net checkpoint,
+   the lung U-Net checkpoint, and all 14 prior_maps\*.npy files. Do not include
+   NIH images, labels, or generated per-image lung masks.
+2. Configure APEX_CHECKPOINT, LUNG_CHECKPOINT, PRIOR_MAP_DIR, APEX_DEVICE and
+   FRONTEND_ORIGINS on the API host. Keep model assets outside public static
+   folders. Protect the service with HTTPS and authentication/rate limits.
+3. Configure APEX_BACKEND_URL on Vercel to the HTTPS API origin and
+   APEX_BACKEND_API_KEY to a strong secret. Configure the same APEX_API_KEY on
+   the API host. These variables must be server-only (no NEXT_PUBLIC_ prefix).
+4. Redeploy Vercel. The existing /api/predict server route continues to
+   authenticate the Supabase user and forwards the image to the model API.
+5. Vercel Functions impose request-body limits that can be lower than this
+   project's 10 MB local limit. If uploads exceed the deployed function limit,
+   upload to private Supabase Storage and change the server proxy to pass a
+   short-lived signed URL/reference instead of forwarding the file bytes.
+6. Set a spending budget/alert for any cloud service and validate its free-tier
+   limits. CPU inference may be slow; a GPU is optional and usually not free.
+
+   Example local image build:
+   docker build -f Dockerfile.api -t apexnet-api .
+
+   The API image defaults to CPU inference. A cloud GPU requires a GPU-capable
+   host, compatible CUDA/PyTorch packages, and a non-free GPU plan in most cases.
+
+Heatmap interpretation
+----------------------
+The overlays use class-specific gradients from the lung and disease-prior APAM
+branches, combine the branch maps with the matching disease prior, and mask the
+result to the generated lung ROI. They are approximate model-attention maps,
+not lesion segmentation or clinically validated localization.

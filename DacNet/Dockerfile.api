@@ -1,0 +1,23 @@
+FROM python:3.10-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    APEX_DEVICE=cpu
+
+WORKDIR /app
+
+COPY api-requirements.txt .
+RUN python -m pip install --upgrade pip && \
+    python -m pip install --index-url https://download.pytorch.org/whl/cpu \
+        torch==2.5.1 torchvision==0.20.1 && \
+    python -m pip install -r api-requirements.txt
+
+COPY backend ./backend
+COPY scripts/lung_roi.py ./scripts/lung_roi.py
+COPY models/apam.py ./models/apam.py
+COPY models/lung_unet.pth ./models/lung_unet.pth
+COPY models/ngp6gwkn/best_model_20261006-050300.pth ./models/ngp6gwkn/best_model_20261006-050300.pth
+COPY prior_maps ./prior_maps
+
+CMD ["sh", "-c", "uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8080}"]

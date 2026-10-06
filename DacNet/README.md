@@ -149,8 +149,11 @@ python scripts\predict_apexnet.py --image "C:\path\to\chest-xray.png"
 
 The predictor defaults to the latest APEX-Net checkpoint and generates a lung
 mask with `models\lung_unet.pth`. To reuse a precomputed mask, pass
-`--lung_mask "C:\path\to\lung-mask.png"`. Scores are sigmoid probabilities;
-they are not clinical diagnoses.
+`--lung_mask "C:\path\to\lung-mask.png"`. Scores are sigmoid model outputs,
+not calibrated diagnostic probabilities or clinical diagnoses.
+
+For the local HTTP API, APEX-Net Grad-CAM overlays, and connecting the
+authenticated Next.js frontend, follow [back-front.txt](../back-front.txt).
 
 By default, the trainer checks both `<data_dir>\lung_masks` and the project
 `lung_masks\` directory, and selects the location containing the most matching

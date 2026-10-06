@@ -19,7 +19,8 @@ __pycache__/
 
 # Checkpoints and training output
 
-/prior_maps/
+/prior_maps/*
+!/prior_maps/*.npy
 *.pth
 *.pt
 *.ckpt

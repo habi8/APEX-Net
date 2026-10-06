@@ -7,6 +7,11 @@ lung_roi generation script : python scripts\lung_roi.py generate --data_dir "C:\
 apam training script : python scripts\train_apexnet.py --data_dir C:\NIH_data
 apam testing script : python scripts\predict_apexnet.py --image "C:\NIH_data\images_001\images\00000001_002.png"
 
+run backend : Set-Location E:\Projects\APEX-Net\APEX-Net\DacNet
+.\venv\Scripts\Activate.ps1
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+
+
 Using NIH_data and the same patient-level split as the training script, the exact counts are:
 
 Split	Images	Patients
