@@ -39,6 +39,28 @@ def configured_path(name, default):
     return Path(os.environ.get(name, str(default))).expanduser().resolve()
 
 
+def has_plausible_bilateral_lung_mask(binary_mask):
+    mask = np.asarray(binary_mask, dtype=bool)
+    if mask.ndim != 2 or min(mask.shape) == 0:
+        return False
+
+    height, width = mask.shape
+    if width < 2:
+        return False
+    area = float(mask.mean())
+    if not 0.04 <= area <= 0.65:
+        return False
+    if min(float(mask[:, :width // 2].mean()), float(mask[:, width // 2:].mean())) < 0.01:
+        return False
+
+    rows, columns = np.nonzero(mask)
+    if not len(rows):
+        return False
+    vertical_span = (int(rows.max()) - int(rows.min()) + 1) / height
+    horizontal_span = (int(columns.max()) - int(columns.min()) + 1) / width
+    return vertical_span >= 0.30 and horizontal_span >= 0.25
+
+
 def build_overlay(original, crop_cam, crop_mask, resized_size, crop_origin):
     resized_width, resized_height = resized_size
     crop_left, crop_top = crop_origin
@@ -253,6 +275,14 @@ def predict(
                 mode="bilinear",
                 align_corners=False,
             )[0, 0].cpu().numpy()
+        if not has_plausible_bilateral_lung_mask(lung_probabilities >= 0.5):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Could not detect both lungs in this image. "
+                    "Please upload a clear frontal chest X-ray."
+                ),
+            )
         lung_mask_image = Image.fromarray(
             postprocess_mask(lung_probabilities >= 0.5, dilation_radius=5) * 255
         )

@@ -47,6 +47,10 @@ before choosing a plan.
 5. Deploy. Once the service is live, check `https://<render-service>.onrender.com/health`
    and wait for `"status": "ok"`. The API endpoint is
    `https://<render-service>.onrender.com/predict`.
+   Before classifying, `/predict` checks that the lung segmenter finds a
+   plausible mask on both sides of the image. This rejects many unrelated
+   images, but is only a heuristic: it is not a dedicated CXR classifier and
+   may reject atypical X-rays or accept some non-X-ray images.
 6. In the **server-side environment settings** of the existing frontend host,
    set `APEX_BACKEND_URL` to the Render service URL (without `/predict`) and
    `APEX_BACKEND_API_KEY` to the same secret as `APEX_API_KEY`. Redeploy the
