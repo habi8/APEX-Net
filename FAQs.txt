@@ -1,0 +1,89 @@
+APEX-Net FAQs
+============
+
+Questions and answers will be added here during the Q&A session.
+
+Q: How do you validate input images, and what happens if someone uploads a
+   non-CXR image?
+
+A: The frontend first checks that the selected file is reported as an image
+   and is no larger than 10 MB. The backend then checks that it is a supported,
+   decodable image, is within the size and dimension limits, and runs the lung
+   segmentation model. If the predicted mask does not look like plausible lungs
+   on both sides, the API rejects it and asks for a clear frontal chest X-ray.
+   This lung-mask test is only a heuristic, not a dedicated CXR-vs-non-CXR
+   classifier: some non-CXR images can pass, and some valid X-rays can fail.
+   If a non-CXR passes the checks, APEX-Net may still produce disease scores.
+   Also, the current upload flow stores the image before this backend check, so
+   a rejected image may already have been uploaded. A trained and independently
+   tested CXR-vs-non-CXR classifier would provide a stronger gate.
+
+Q: Why does every disease have a score? If hernia has a 56% score, does that
+   mean the person has a hernia?
+
+A: APEX-Net is a multi-label classifier: it estimates a separate score for
+   each of 14 findings, which can coexist, rather than choosing exactly one
+   disease. The displayed scores are sigmoid model outputs and are not
+   calibrated diagnostic probabilities. A 56% hernia score does not establish
+   that the person has a hernia and should not be interpreted as a diagnosis.
+   Results are for research/demo use and require review by a qualified
+   healthcare professional.
+
+Q: Does this mean APEX-Net cannot detect disease? What is it useful for?
+
+A: APEX-Net can analyze a chest X-ray and produce scores that rank how strongly
+   its model associates the image with each of 14 learned findings. Those
+   scores can support research, model evaluation, or a demonstration of
+   multi-label classification, and may help identify images for closer review.
+   They do not confirm or rule out disease in an individual patient. Clinical
+   use would require rigorous independent testing, appropriate calibration and
+   operating thresholds, assessment across patient groups and imaging settings,
+   and review by qualified clinicians. Until then, treat it as a research
+   prototype, not a diagnostic or screening product.
+
+Q: What does the heatmap indicate?
+
+A: The heatmap is a class-specific Grad-CAM visualization showing image regions
+   that contributed relatively more to the model's score for the selected
+   finding. Warmer/brighter regions indicate stronger relative model attention
+   in that image; they are not disease probabilities, severity measurements,
+   or confirmed lesion locations. The overlay is restricted to the predicted
+   lung region, and errors in that lung mask can affect or cut off the heatmap.
+   It is an approximate explanation of model behavior, not a validated
+   localization result or a medical diagnosis.
+
+Q: What is the Attention Prior Module (APAM), and how does it work?
+
+A: In APEX-Net, each of the 14 findings has two APAM branches. One receives a
+   lung-region mask; the other receives that finding's spatial prior map. APAM
+   summarizes DenseNet image features globally and within the supplied mask or
+   prior, learns weights for feature channels, and blends the original features
+   with the spatially masked features. The two branch outputs are combined and
+   used to produce that finding's score. The prior maps are dataset-level
+   spatial hints generated from NIH bounding-box annotations, not exact
+   boundaries for the uploaded image; classes without box annotations use a
+   uniform prior. APAM guides the model's attention but does not itself
+   localize or prove a disease. Its heatmaps remain approximate explanations,
+   not validated lesion outlines.
+
+Q: What is the difference between lung masks and ROI maps?
+
+A: ROI means "region of interest." In this pipeline, the lung mask is the
+   per-image segmentation produced by the lung U-Net: pixels inside its
+   predicted lung regions are marked on, and pixels outside are marked off.
+   The lung ROI is that mask after resizing/cropping to match the classifier's
+   input or feature-map dimensions; it is used to guide attention and constrain
+   the heatmap. They refer to the same lung region at different processing
+   stages, not two independent annotations. Disease-prior maps are different:
+   they are shared, class-specific spatial hints derived from dataset
+   annotations, rather than a segmentation of the current image.
+
+Q: Is APEX-Net reliable for preliminary diagnosis?
+
+A: No. It should not be used to make or guide a patient's diagnosis, even as a
+   preliminary diagnosis. The current system reports uncalibrated model scores
+   and approximate attention maps; these do not establish or rule out disease.
+   The deployed model would need rigorous independent clinical validation,
+   calibration, and evaluation across patient populations and imaging settings
+   before clinical use could be considered. Use it only as a research/demo
+   prototype, and have medical concerns assessed by a qualified clinician.

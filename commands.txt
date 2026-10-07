@@ -10,7 +10,7 @@ apam testing script : python scripts\predict_apexnet.py --image "C:\NIH_data\ima
 run backend : Set-Location E:\Projects\APEX-Net\APEX-Net\DacNet
 .\venv\Scripts\Activate.ps1
 python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
-
+connect to cloudflared tunnel : cloudflared tunnel --url http://localhost:8000 
 
 Using NIH_data and the same patient-level split as the training script, the exact counts are:
 
