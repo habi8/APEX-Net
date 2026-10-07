@@ -87,3 +87,32 @@ A: No. It should not be used to make or guide a patient's diagnosis, even as a
    calibration, and evaluation across patient populations and imaging settings
    before clinical use could be considered. Use it only as a research/demo
    prototype, and have medical concerns assessed by a qualified clinician.
+
+Q: Which models does the backend use, how large are they, and what CPU/GPU
+   resources are needed for inference?
+
+A: The backend loads two PyTorch models:
+   1. APEX-Net: a DenseNet-121 image-classification backbone with per-finding
+      Anatomy Prior Attention Module (APAM) branches and 14 output classifiers.
+      It has about 16.2 million parameters and processes a 224x224 image crop.
+      Its default checkpoint is
+      models/ngp6gwkn/best_model_20261006-050300.pth (about 65.5 MB).
+   2. Lung U-Net: a base-32-channel U-Net for lung segmentation. Its checkpoint
+      uses 256x256 input and has about 7.8 million parameters. The default
+      checkpoint is models/lung_unet.pth (about 31.1 MB).
+   Together they have about 24.0 million parameters (about 91 MiB of FP32
+   weights in memory); this excludes PyTorch, intermediate activations, image
+   arrays, and heatmap generation. The API defaults to CPU unless APEX_DEVICE
+   selects an available CUDA or MPS device. A GPU is optional, not required.
+
+   Practical starting estimates, not benchmarked minimums: use at least 4 GB
+   system RAM and 2-4 modern CPU cores for one-at-a-time inference on ordinary
+   X-rays; 8 GB RAM gives safer headroom for large images and the API's
+   40-megapixel limit. If using a GPU, 4 GB VRAM is a reasonable starting
+   target, but actual needs and speed depend on the GPU, software stack, image
+   size, and request load. The API serializes model inference within one
+   process, so additional simultaneous requests wait; multiple server workers
+   each load another copy of both models. Top-three Grad-CAM heatmaps require
+   extra model/gradient work and can make requests slower than classification
+   scores alone. Measure startup RAM, peak RAM/VRAM, and latency on the intended
+   host and representative images before choosing a hosting plan.
