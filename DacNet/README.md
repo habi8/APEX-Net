@@ -218,6 +218,11 @@ not calibrated diagnostic probabilities or clinical diagnoses.
 
 For the local HTTP API, APEX-Net Grad-CAM overlays, and connecting the
 authenticated Next.js frontend, follow [back-front.txt](../back-front.txt).
+API heatmaps are displayed across the full source image rather than clipped to
+the lung mask's hard boundary. The Grad-CAM is aligned with the model's
+center-cropped input, and a blurred version of the lung ROI feathers the
+overlay at its edges. The lung mask still affects model inference; heatmap
+display settings do not alter prediction scores.
 
 By default, the trainer checks both `<data_dir>\lung_masks` and the project
 `lung_masks\` directory, and selects the location containing the most matching

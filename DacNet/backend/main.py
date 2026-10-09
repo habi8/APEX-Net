@@ -73,24 +73,24 @@ def build_overlay(original, crop_cam, crop_mask, resized_size, crop_origin):
     )
     cam = np.asarray(cam_image, dtype=np.float32) / 255.0
 
-    mask_canvas = np.zeros((resized_height, resized_width), dtype=np.uint8)
-    mask_canvas[crop_top:crop_top + height, crop_left:crop_left + width] = (
-        crop_mask.astype(np.uint8) * 255
-    )
-    mask_image = Image.fromarray(mask_canvas, mode="L").resize(
-        original.size, Image.Resampling.NEAREST
-    )
-    mask = np.asarray(mask_image) > 0
-    cam *= mask
     maximum = float(cam.max())
     if maximum > 0:
         cam /= maximum
+
+    soft_mask_image = crop_mask.convert("L").filter(
+        ImageFilter.GaussianBlur(radius=max(2, round(min(original.size) / 75)))
+    )
+    if soft_mask_image.size != original.size:
+        soft_mask_image = soft_mask_image.resize(
+            original.size, Image.Resampling.BILINEAR
+        )
+    soft_mask = np.asarray(soft_mask_image, dtype=np.float32) / 255.0
 
     red = np.clip(1.5 - np.abs(4 * cam - 3), 0, 1)
     green = np.clip(1.5 - np.abs(4 * cam - 2), 0, 1)
     blue = np.clip(1.5 - np.abs(4 * cam - 1), 0, 1)
     colors = np.stack((red, green, blue), axis=-1)
-    alpha = (cam * mask * 0.50)[..., None]
+    alpha = (cam * soft_mask * 0.50)[..., None]
     source = np.asarray(original, dtype=np.float32) / 255.0
     blended = source * (1 - alpha) + colors * alpha
     output = Image.fromarray(np.uint8(np.clip(blended, 0, 1) * 255), mode="RGB")
@@ -99,7 +99,7 @@ def build_overlay(original, crop_cam, crop_mask, resized_size, crop_origin):
     return "data:image/webp;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
-def gradcam_for_class(model, outputs, activations, class_index, prior_map, lung_roi):
+def gradcam_for_class(model, outputs, activations, class_index, prior_map):
     lung_activation = activations[("lung", class_index)]
     prior_activation = activations[("prior", class_index)]
     lung_gradient, prior_gradient = torch.autograd.grad(
@@ -120,7 +120,6 @@ def gradcam_for_class(model, outputs, activations, class_index, prior_map, lung_
     lung_cam = F.interpolate(lung_cam, size=target_size, mode="bilinear", align_corners=False)
     prior_cam = F.interpolate(prior_cam, size=target_size, mode="bilinear", align_corners=False)
     prior_map = F.interpolate(prior_map, size=target_size, mode="bilinear", align_corners=False)
-    lung_roi = F.interpolate(lung_roi, size=target_size, mode="nearest")
 
     def normalize(cam):
         maximum = cam.amax(dim=(2, 3), keepdim=True)
@@ -128,7 +127,6 @@ def gradcam_for_class(model, outputs, activations, class_index, prior_map, lung_
 
     combined = (0.5 * normalize(lung_cam) + 0.5 * normalize(prior_cam) * prior_map)
     combined = F.avg_pool2d(combined, kernel_size=3, stride=1, padding=1)
-    combined = combined * lung_roi
     maximum = combined.amax(dim=(2, 3), keepdim=True)
     combined = torch.where(
         maximum > 0, combined / maximum.clamp_min(1e-8), torch.zeros_like(combined)
@@ -199,7 +197,7 @@ async def lifespan(app):
 app = FastAPI(
     title="APEX-Net inference API",
     version="1.0.0",
-    description="APEX-Net disease scores and lung-constrained APAM Grad-CAM overlays.",
+    description="APEX-Net disease scores and full-image APAM Grad-CAM overlays.",
     lifespan=lifespan,
 )
 
@@ -290,13 +288,13 @@ def predict(
         resized_image = TF.resize(
             original, 256, interpolation=InterpolationMode.BILINEAR
         )
+        image_crop = TF.center_crop(resized_image, [IMAGE_SIZE, IMAGE_SIZE])
+        resized_width, resized_height = resized_image.size
+        crop_left = int(round((resized_width - IMAGE_SIZE) / 2))
+        crop_top = int(round((resized_height - IMAGE_SIZE) / 2))
         resized_mask = TF.resize(
             lung_mask_image, 256, interpolation=InterpolationMode.NEAREST
         )
-        resized_width, resized_height = resized_image.size
-        left = int(round((resized_width - IMAGE_SIZE) / 2))
-        top = int(round((resized_height - IMAGE_SIZE) / 2))
-        image_crop = TF.center_crop(resized_image, [IMAGE_SIZE, IMAGE_SIZE])
         mask_crop = TF.center_crop(resized_mask, [IMAGE_SIZE, IMAGE_SIZE])
         image_tensor = TF.normalize(TF.to_tensor(image_crop), MEAN, STD).unsqueeze(0).to(device)
         lung_roi = (TF.to_tensor(mask_crop) > 0).float().unsqueeze(0).to(device)
@@ -345,14 +343,13 @@ def predict(
                     activations,
                     class_index,
                     prior_tensor[:, class_index:class_index + 1],
-                    lung_roi,
                 )
                 heatmaps[DISEASES[class_index]] = build_overlay(
                     original,
                     cam,
-                    lung_roi[0, 0].detach().cpu().numpy() > 0,
+                    lung_mask_image,
                     resized_image.size,
-                    (left, top),
+                    (crop_left, crop_top),
                 )
         finally:
             for handle in handles:
@@ -376,7 +373,7 @@ def predict(
         "prediction": {
             "findings": findings,
             "heatmaps": heatmaps,
-            "heatmap_method": "Class-specific APAM branch Grad-CAM, constrained to the U-Net lung ROI",
+            "heatmap_method": "Class-specific APAM branch Grad-CAM with a softly feathered U-Net lung ROI overlay",
             "overall_assessment": (
                 "APEX-Net produced the listed multi-label model scores. "
                 "Scores are not calibrated diagnostic probabilities."
