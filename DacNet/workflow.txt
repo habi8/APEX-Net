@@ -1,89 +1,493 @@
-APEX-Net / DACNet workflow summary
-==================================
+APEX-Net / DACNet: complete technical workflow
+================================================
 
-Lung ROI script
----------------
-Script: scripts/lung_roi.py
+Purpose and scope
+-----------------
+The active APEX-Net pipeline predicts 14 NIH ChestX-ray14 findings from one
+chest X-ray. It combines:
 
-This is the new, separate lung-segmentation workflow. It trains a custom U-Net
-on the JSRT X-rays and masks, then uses that checkpoint to create a lung mask
-for every NIH image. Post-processing keeps up to two largest connected
-components, fills their convex hulls, and dilates the result.
+  1. DenseNet-121 image features,
+  2. a U-Net-generated lung region-of-interest (ROI) mask, and
+  3. 14 disease-specific spatial prior maps derived from NIH bounding boxes.
 
-Current defaults are configured in DEFAULT_CONFIG in scripts/lung_roi.py:
-  JSRT images: C:\JSRT\jsrt\cxr
-  JSRT masks:  C:\JSRT\jsrt\masks
-  NIH images:  C:\NIH_data
-  device:      cuda
-  U-Net weights: models\lung_unet.pth
+The classifier returns one independent score per finding. This is a
+multi-label task: more than one finding can be present in the same image.
+The U-Net is a separate segmentation model; it does not classify diseases.
+Prior maps are dataset-level spatial statistics; they are not lesion masks
+for the particular input image.
 
-From the DacNet project directory:
-  python scripts\lung_roi.py train
-  python scripts\lung_roi.py generate
+The main APEX-Net files are models/apam.py, scripts/lung_roi.py,
+scripts/generate_prior_maps.py, scripts/train_apexnet.py,
+scripts/predict_apexnet.py, and backend/main.py. Other scripts in scripts/
+and XRay_app/ contain separate image-only baselines or older demos; they
+should not be confused with APEX-Net.
 
-The generated NIH masks go under C:\NIH_data\lung_masks and keep the original
-image dimensions and relative folders. DACNet and FZLPR-DACNet do not consume
-these masks; APEX-Net uses them during training.
 
-Classification models
----------------------
-Basic DACNet: scripts/dacnet.py
+1. Backbone: DenseNet-121
+-------------------------
+File: models/apam.py
 
-This trains a DenseNet-121 classifier for the 14 NIH ChestX-ray14 findings.
-It uses a focal loss to emphasize harder examples, which is intended to help
-with class imbalance. Its best checkpoint is saved as:
-  models\<Weights & Biases run ID>\best_model_<timestamp>.pth
-The latest completed focal-loss checkpoint currently in the repository is:
-  models\yyc9g0js\best_model_20260802-061232.pth
+DenseNet-121 is the convolutional image-feature backbone. In a DenseNet,
+layers within a dense block receive feature maps from earlier layers by
+concatenation. This encourages feature reuse and provides short paths for
+gradient flow. It is a feature extractor here, not a 14-class ImageNet
+classifier.
 
-FZLPR-DACNet: scripts/dacnet_fzlpr.py
+APEXNet initializes torchvision's DenseNet-121 with ImageNet-1K pretrained
+weights when pretrained=True. It keeps backbone.features, removes the
+original ImageNet classifier, applies ReLU to the final feature map, and
+builds the APEX-Net attention and disease heads on top. The APEX training
+script optimizes model.parameters(), so the backbone and the new modules are
+both trainable; the backbone is not frozen.
 
-This is the FZLPR version of the DenseNet-121, 14-label classifier. It uses
-FZLPR loss (with configurable temperature tau) and supports test-time
-augmentation (horizontal flip and zoom) when evaluating. Its best checkpoint
-is saved in the same run-specific location:
-  models\<Weights & Biases run ID>\best_model_<timestamp>.pth
+For a 224 x 224 input, the final DenseNet feature map has 1024 channels and
+approximately 7 x 7 spatial positions. The exact map size follows the
+backbone's convolution and pooling strides.
 
-These classification checkpoints are independent of the U-Net checkpoint.
-Training the U-Net neither loads nor overwrites the DACNet weights.
 
-Prior maps
-----------
-Script: scripts/generate_prior_maps.py
+2. Lung segmentation: U-Net training
+------------------------------------
+File: scripts/lung_roi.py
+Model: LungUNet (custom U-Net; it is not DenseNet and is not pretrained).
 
-This reads NIH bounding-box annotations from BBox_List_2017.csv and creates
-one disease-specific spatial prior map per finding as a .npy file. Annotated
-findings are built from the bounding boxes; unannotated findings get an
-all-ones map. By default maps are saved under:
-  DacNet\prior_maps\
+The U-Net has a contracting encoder and expanding decoder. Each stage uses
+two 3 x 3 convolutions, batch normalization, and ReLU. Max pooling reduces
+spatial resolution while the channel count grows from 32 through 64, 128,
+and 256 to a 512-channel bottleneck by default. Transposed convolutions
+upsample the decoder; skip connections concatenate encoder features at the
+matching resolution. A final 1 x 1 convolution returns one foreground logit
+per pixel.
 
-Example:
+Training data are paired JSRT X-rays and lung masks. The script accepts
+either one mask per image or separate <stem>_L / <stem>_R masks, unions any
+matching masks, converts X-rays to grayscale, and resizes images and masks
+to 256 x 256 (bilinear for images; nearest-neighbor for masks). Pixel values
+are scaled to [0, 1]. A seeded random split assigns 80% of paired images to
+training and 20% to validation; this is an image-level split.
+
+Training augmentation is a 50% chance of a horizontal flip applied to both
+image and mask. The loss is binary cross-entropy with logits plus soft Dice
+loss:
+
+  BCEWithLogits + (1 - (2 * intersection + 1) / (sum(probabilities)
+  + sum(targets) + 1))
+
+Dice is calculated per image and averaged across the batch. The optimizer is
+Adam, default learning rate 0.001. Defaults are 50 epochs, batch size 32,
+input size 256, and base channel count 32. The checkpoint is replaced only
+when validation loss improves. It stores the state_dict, image_size, and
+base_channels; the defaults write models/lung_unet.pth.
+The U-Net CLI defaults to CUDA; pass --device cpu on a CPU-only machine.
+
+This stage validates using the combined loss, not a reported held-out Dice or
+IoU score. There is no automatic early stopping in the U-Net training loop.
+
+
+3. Apply the trained U-Net to NIH X-rays
+----------------------------------------
+File: scripts/lung_roi.py, command "generate".
+
+For every supported image under the NIH data directory, the script converts
+it to grayscale, resizes it to the checkpoint's square input size, scales
+pixels to [0, 1], runs the U-Net, and applies sigmoid to its output logits.
+It bilinearly resizes the probability map back to the original image size,
+then thresholds it at 0.5 by default.
+
+Post-processing (postprocess_mask):
+  1. Find 8-connected foreground components.
+  2. Keep at most the two largest components, intended to retain left and
+     right lungs.
+  3. Fill each retained component's convex hull.
+  4. Dilate the result using a disk-shaped structuring element; default
+     radius is 5 pixels.
+
+The result is a binary 8-bit PNG with the original image dimensions. Its
+relative image-folder path is preserved under <data_dir>/lung_masks unless
+--output_dir is supplied. APEX training requires a matching mask for every
+image it uses; it searches <data_dir>/lung_masks and the project lung_masks
+directory unless --lung_mask_dir is specified.
+
+*Important: the mask is a coarse anatomical ROI, not a disease segmentation
+or lesion boundary. The U-Net weights are independent from the APEX-Net
+classifier checkpoint.
+
+
+4. Generate disease prior maps from bounding boxes
+--------------------------------------------------
+File: scripts/generate_prior_maps.py
+Input: NIH BBox_List_2017.csv and the referenced NIH PNG images.
+Output: one float32 NumPy array (<disease>.npy) per disease, 14 total.
+
+The bounding-box CSV contains image name, finding label, x, y, width, and
+height. Coordinates are treated as being on a 1024 x 1024 reference grid:
+x and width are scaled to the image width, y and height to its height; box
+edges are rounded outward and clipped to image bounds. Boxes for a given
+image/finding are rasterized into a binary mask and unioned. Those masks are
+then added into that finding's dataset-level count map. For seven findings
+(Atelectasis, Effusion, Infiltration, Mass, Nodule, Pneumonia, and
+Pneumothorax), the horizontally flipped box mask is added as well to make the
+prior less dependent on left/right position.
+
+*The eight box-annotated findings are Atelectasis, Cardiomegaly, Effusion,
+Infiltration, Mass, Nodule, Pneumonia, and Pneumothorax. The label
+"Infiltrate" is renamed "Infiltration". Each annotated disease's accumulated
+count map is divided by its own maximum, producing values from 0 to 1.
+Findings without bounding-box annotations in this input (Consolidation,
+Edema, Emphysema, Fibrosis, Hernia, and Pleural_Thickening) receive an
+all-ones map. Therefore, their prior branch supplies no location-specific
+spatial filtering.
+
+All maps have the dimensions of the annotated NIH images. By default they
+are saved in the project's prior_maps directory. The same 14 maps are shared
+across examples; these maps express a coarse dataset-level location bias, not
+per-image ground truth.
+
+
+5. APEX-Net: how the image, lung ROI, and prior maps are used
+-----------------------------------------------------------
+Files: models/apam.py (model), scripts/train_apexnet.py (training).
+
+APEXNet receives:
+  image:             [batch, 3, height, width]
+  lung mask:         [batch, 1, height, width]
+  disease prior map: [batch, 14, height, width]
+
+The 14 map channels follow the same order as DISEASES in
+scripts/train_apexnet.py. DenseNet processes the image once to create a
+shared feature map F. The lung mask is resized to feature-map resolution
+with nearest-neighbor interpolation. Disease prior maps are resized with
+bilinear interpolation.
+
+APAM means Anatomy Prior Attention Module. For one feature map F and one
+single-channel spatial mask M, APAM:
+  1. Multiplies F by M to create spatially masked features F*M.
+  2. Calculates global average-pool and global max-pool descriptors for
+     both F and F*M. Each descriptor has one value per feature channel.
+  3. Sends each descriptor through its own channel-reduction linear layer
+     (1024 to 64 by default, reduction=16) and LeakyReLU (slope 0.2).
+  4. Adds the four reduced descriptors, projects back to 1024 channels,
+     and applies sigmoid to get channel weights w in [0, 1].
+  5. Returns the channel-wise blend:
+
+       w * F + (1 - w) * (F * M)
+
+The learned channel weights let the network mix global image evidence with
+evidence emphasized by the spatial mask. APAM does not create the lung mask
+or prior map; those are supplied as inputs.
+
+There are two separate, disease-specific APAM branches for each output:
+  - a lung branch using the U-Net ROI mask, and
+  - a prior branch using that disease's prior map.
+
+With 14 findings this means 28 APAM instances. For each finding, APEXNet
+concatenates the 1024-channel lung-branch feature map and 1024-channel
+prior-branch feature map, globally average-pools the resulting 2048
+channels, and applies that finding's own linear 2048-to-1 classifier. The
+14 scalar outputs are raw logits.
+
+*There is no pixelwise "merge the two input maps" step inside APEXNet.
+Instead, each map conditions its own APAM branch; the two resulting image
+feature representations are concatenated and pooled. This distinction is
+important when explaining how the model combines the cues.
+
+
+6. APEX-Net classification training and validation
+-------------------------------------------------
+File: scripts/train_apexnet.py
+Dataset: NIH ChestX-ray14 Data_Entry_2017.csv plus images_001 through
+images_012, matching lung-mask PNGs, and the 14 prior-map arrays.
+
+Label preparation:
+  - Split the Finding Labels field on "|".
+  - Encode each of the 14 findings as a separate 0/1 target.
+  - "No Finding" becomes fourteen zeros.
+  - Multiple findings can be positive for one image.
+
+*Data split is by unique Patient ID, not by image: 2% of patients are
+reserved for test; 5.2% of the remaining patients are reserved for
+validation; the rest are used for training. The default seed is 42. This
+avoids putting different images from the same patient in different splits.
+Percentages are approximate because the split is over whole patients.
+
+All inputs stay aligned during training augmentation:
+  - RandomResizedCrop to 224 x 224, scale 0.08-1.0 and aspect ratio 3/4-4/3.
+  - 50% chance of horizontal flip.
+  - Brightness and contrast ColorJitter (0.1 each) on the image only.
+  - The same crop/flip is applied to lung masks and all 14 prior maps;
+    nearest-neighbor is used for binary masks and bilinear for continuous
+    maps.
+
+Validation and test use Resize(256), CenterCrop(224), no random augmentation,
+and ImageNet normalization:
+  mean = [0.485, 0.456, 0.406]
+  std  = [0.229, 0.224, 0.225]
+
+*The classification loss is focal binary cross-entropy, averaged over all
+batch entries and classes:
+
+  BCE = BCEWithLogits(logits, targets)
+  p_t = exp(-BCE)
+  loss = alpha * (1 - p_t)^gamma * BCE
+
+Defaults are alpha=1, gamma=2. The factor (1-p_t)^gamma down-weights
+well-classified examples and leaves harder examples with more influence.
+It is applied to binary cross-entropy per label; this is not softmax
+cross-entropy because the task is multi-label.
+
+*The optimizer is AdamW over the full APEXNet with learning rate 1e-4 and
+weight decay 1e-5. ReduceLROnPlateau monitors validation loss (factor 0.1,
+patience 1). Default training settings are 25 epochs, batch size 8, 4
+workers, and early-stopping patience 5. Early stopping and best-checkpoint
+selection are based on validation mean AUC, not validation loss. Weights &
+Biases records the run and metrics.
+
+At each epoch the script reports mean loss, per-class AUROC, and mean AUROC.
+It also computes a per-class F1-maximizing threshold from that same
+validation or test set's precision-recall curve, then reports F1. AUROC is
+threshold-independent; F1 is not. The best state_dict is saved under
+models/<Weights & Biases run ID>/best_model_<timestamp>.pth based on the
+highest validation mean AUROC. After training, that best checkpoint is
+reloaded and the held-out test loader is evaluated.
+
+
+7. What "confidence" means
+--------------------------
+APEXNet produces one raw logit per disease. The predictor and API apply
+sigmoid independently to each logit:
+
+  score = 1 / (1 + exp(-logit))
+
+This maps each score to [0, 1]. Scores are sorted independently to rank
+findings; multiple findings can have high scores at once. No softmax forces
+the scores to sum to one.
+
+*The value shown as "confidence" by the API and as a percentage by the
+command-line predictor is this sigmoid model score. The current inference
+path does not apply validation thresholds and the training code does not
+perform probability calibration. Do not describe these numbers as calibrated
+clinical probabilities, confirmed diagnoses, disease severity, or an
+estimate of certainty. The API explicitly returns severity as "not assessed"
+and states that its scores are not calibrated diagnostic probabilities.
+
+
+8. Testing, single-image prediction, and backend heatmaps
+--------------------------------------------------------
+Single-image prediction file: scripts/predict_apexnet.py
+
+This script loads the APEX-Net state_dict, the U-Net checkpoint (unless a
+--lung_mask is provided), and all 14 prior maps. It generates or reads a
+lung mask, resizes and center-crops the image and aligned maps to the
+training input format, normalizes the RGB image, then prints sorted sigmoid
+scores. Its default APEX checkpoint is
+models/ngp6gwkn/best_model_20261006-050300.pth. The displayed percentages
+are model scores, not a clinical diagnosis.
+
+HTTP inference file: backend/main.py
+
+The FastAPI application loads the APEX checkpoint, U-Net checkpoint, and
+all prior maps once at startup. POST /predict accepts an image, validates
+the file type/size/dimensions, runs the U-Net, and checks whether the
+thresholded mask is plausibly bilateral before classification. This is a
+geometric heuristic (area, occupancy on each half, and overall width and
+height), not a dedicated chest-X-ray detector; it can reject unusual X-rays
+or accept some non-X-rays.
+
+The API returns disease scores and up to 1-5 class-specific heatmaps
+(default 3). A heatmap is produced after the score, for display:
+  1. Forward hooks capture the selected class's lung-APAM and prior-APAM
+     outputs.
+  2. Gradients of that class logit with respect to each branch output are
+     averaged spatially to get channel weights.
+  3. Each branch's Grad-CAM is the ReLU of the channel-weighted activation
+     sum. The two CAMs are resized to 224 x 224 and normalized separately.
+  4. The displayed class map is:
+
+       0.5 * normalized_lung_CAM
+       + 0.5 * normalized_prior_CAM * that_class_prior_map
+
+     It is smoothed with a 3 x 3 average pool and normalized again.
+  5. The center-cropped CAM is placed back into the resized-image canvas,
+     upscaled to the original image, and blurred. A blurred lung mask
+     softens the overlay edge. The alpha is 0.5 * CAM * soft_lung_mask and
+     the colored heatmap is blended with the original image.
+
+This is an attention/Grad-CAM visualization, not a lesion segmentation,
+bounding box, or pixel-accurate explanation. The prior affects the displayed
+map and also conditions the classifier through APAM. The U-Net mask affects
+classification and is additionally used to feather the visualization.
+Neither the heatmap nor overlay changes the already-computed disease score.
+
+Upload validation accepts JPEG, PNG, WEBP, and BMP; limits the request image
+to 10 MiB and 40 million pixels; and requires at least 32 x 32 pixels. The
+bilateral-mask heuristic requires foreground area between 4% and 65%, at
+least 1% occupancy in each image half, a vertical span of at least 30%, and
+a horizontal span of at least 25%. These are engineering rejection checks,
+not a validated chest-X-ray classifier.
+
+The API's `confidence` field is the same sigmoid score described above.
+It also labels heatmap locations as "Attention overlay available; not a
+lesion boundary". The heatmap endpoint behavior is implemented in
+backend/main.py; the overlay and bilateral-mask unit tests are in
+tests/test_backend_heatmap.py and tests/test_backend_input_validation.py.
+
+
+9. Evaluation files and interpretation
+---------------------------------------
+APEX-Net's training, validation, and final test evaluation are all in
+scripts/train_apexnet.py. There is not a separate APEX-specific test script
+in this repository. Per-disease ROC AUC uses sigmoid scores. F1 and other
+thresholded metrics depend on a cutoff.
+
+Important evaluation caveat: evaluate() in train_apexnet.py chooses
+F1-maximizing thresholds from whichever labels it is currently evaluating.
+That is acceptable for describing validation F1, but on the final test pass
+it uses test labels to choose test thresholds. Therefore that test F1 is not
+an unbiased held-out F1 estimate. A rigorous reported test F1 should select
+thresholds on validation only, freeze them, and apply those same thresholds
+to test labels. AUROC does not have this particular threshold-selection
+issue.
+
+There is also a prior-map independence caveat: generate_prior_maps.py
+aggregates all rows in BBox_List_2017.csv into shared maps, while
+train_apexnet.py splits patients afterward. If bounding-box-annotated
+patients overlap the held-out split, their box locations contributed to the
+prior map used for evaluation. A strictly independent evaluation should
+build prior maps using training-patient annotations only (or otherwise
+demonstrate that held-out annotations were excluded).
+
+scripts/evaluate_checkpoint.py is a separate evaluation helper for a
+plain DenseNet-121 with a single 14-output linear classifier. It calculates
+validation-set thresholds, applies them to a patient-held-out test set, and
+reports AUC, precision, recall, specificity, F1, and accuracy. Its model
+definition does not include APAM or the APEXNet branches, so it cannot load
+the APEX-Net checkpoint. Do not cite its metrics as APEX-Net results.
+
+The tests under tests/ check backend input-mask plausibility and heatmap
+overlay behavior. They are functional tests, not a model-accuracy benchmark.
+Run them from the DacNet project directory with:
+
+  python -m unittest discover -s tests
+
+
+10. Run order
+-------------
+Run commands from the DacNet project directory. Supply local paths matching
+the actual JSRT and NIH dataset locations.
+
+Step 1 - train the lung segmenter on paired JSRT data:
+
+  python scripts\lung_roi.py train --images_dir C:\JSRT\jsrt\cxr --masks_dir C:\JSRT\jsrt\masks --output models\lung_unet.pth
+
+Step 2 - generate lung ROI masks for NIH images:
+
+  python scripts\lung_roi.py generate --data_dir C:\NIH_data --checkpoint models\lung_unet.pth
+
+Step 3 - create the disease prior maps from NIH bounding boxes:
+
   python scripts\generate_prior_maps.py --data_dir C:\NIH_data
 
-The prior-map generator is also a separate preprocessing step; generating the
-files alone does not apply them to DACNet or FZLPR-DACNet.
+Step 4 - train APEX-Net using the image, mask, and prior inputs:
 
-APEX-Net with APAM
-------------------
-Script: scripts/train_apexnet.py
-
-APEX-Net starts with a pretrained DenseNet-121 and trains it with two spatial
-cues: the lung ROI mask identifies where the lungs are, and each disease prior
-map provides a rough class-specific location bias. APAM pools feature
-descriptors from the full image and the masked region, then learns channel
-weights to combine them. Each disease gets separate lung-mask and prior-map
-attention branches before its classifier. This guides existing image features
-toward relevant anatomy without replacing the image or serving as a disease
-label. Priors are dataset-level maps, not per-image lesion annotations;
-unannotated diseases have all-ones priors and therefore get no spatial
-filtering from that branch.
-
-Train from the DacNet project directory after generating the masks and priors:
   python scripts\train_apexnet.py --data_dir C:\NIH_data
 
-The trainer applies matching crops/flips to each image and its masks/priors.
-Its APEX-Net checkpoint is separate from DACNet and U-Net checkpoints.
+Step 5 - predict one image with the trained APEX-Net:
 
-Previously available classifier checkpoints are not moved by these workflows.
-Check the models directory for the actual run ID and timestamp of each saved
-classification checkpoint.
+  python scripts\predict_apexnet.py --image C:\path\to\chest-xray.png
+
+Use --checkpoint, --lung_checkpoint, --lung_mask, --prior_map_dir, and
+--device when the defaults do not match the local files/runtime. A supplied
+lung mask can skip automatic U-Net prediction for a single image.
+
+Step 6 - run the local API from the DacNet project directory:
+
+  python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+
+GET /health reports service/model readiness. POST /predict accepts an image
+and optional heatmap_count. API checkpoint and data paths can be configured
+with APEX_CHECKPOINT, LUNG_CHECKPOINT, PRIOR_MAP_DIR, and APEX_DEVICE.
+APEX_API_KEY enables API-key authentication when configured.
+
+
+11. File-by-file map
+--------------------
+models/apam.py
+  Defines APAM and APEXNet: DenseNet backbone, class-specific lung/prior
+  feature branches, fusion by feature concatenation, and 14 logits.
+
+scripts/lung_roi.py
+  Defines LungUNet, JSRT dataset loading, Dice+BCE training/validation,
+  best validation-loss checkpointing, mask post-processing, checkpoint
+  loading, and NIH mask generation.
+
+scripts/generate_prior_maps.py
+  Converts NIH box annotations into 14 normalized disease prior arrays.
+
+scripts/train_apexnet.py
+  Loads NIH labels/images and matching maps/masks; makes patient splits;
+  applies aligned augmentation; defines focal loss; trains/validates/tests
+  APEXNet; selects and saves the best validation-AUC checkpoint; logs W&B.
+
+scripts/predict_apexnet.py
+  Local single-image APEX inference and sorted sigmoid score output.
+
+backend/main.py
+  FastAPI startup/model loading, upload checks, U-Net mask plausibility
+  heuristic, APEX inference, class-specific Grad-CAM fusion, overlay
+  generation, and JSON response.
+
+scripts/evaluate_checkpoint.py
+  Separate vanilla DenseNet evaluation helper; not compatible with APEX
+  APAM checkpoints.
+
+scripts/dacnet.py
+  Image-only DenseNet-121 with a 14-unit linear classifier, trained with
+  focal BCE, AdamW, and validation-based scheduling/checkpoint selection.
+  It is a separate DACNet baseline, not the ROI/prior APEX model.
+
+scripts/dacnet_fzlpr.py
+  Separate image-only DenseNet variant with a Dropout/64-unit/BatchNorm/
+  ReLU/14-unit head and FZLPR loss. With z=logits/tau, its implementation
+  computes the batch mean of:
+
+    log(1 + sum(exp(-z * positive_mask)))
+    + log(1 + sum(exp(z * negative_mask)))
+
+  where positive_mask and negative_mask are 1/0 indicators. tau defaults
+  to 0.2. In this code, masked-out terms become exp(0)=1 before summation;
+  this is a detail to verify against the intended FZLPR definition before
+  making claims about that baseline's exact loss. Optional test-time
+  augmentation averages sigmoid predictions for the original, horizontal
+  flip, and 0.9x/1.1x zoomed views. This is not used to train or run
+  APEX-Net.
+
+scripts/replicate_chexnet.py
+  Older image-only DenseNet-121/CheXNet-style reproduction using
+  BCEWithLogitsLoss. It is independent from APEX-Net.
+
+scripts/Predict.py, XRay_app/app.py, XRay_app/utils/model_utils.py
+  Legacy single-image/demo Grad-CAM workflow using a plain DenseNet-based
+  CheXNet model; it does not load the APEXNet architecture.
+
+scripts/vit_transformer.py
+  Separate Vision Transformer experiment/baseline; it is not part of the
+  APEX-Net training or inference path.
+
+tests/test_backend_heatmap.py
+  Checks the lung-feathered colored overlay behavior.
+
+tests/test_backend_input_validation.py
+  Checks the backend's basic plausible-bilateral-mask heuristic.
+
+
+Board-ready summary
+-------------------
+"We use a pretrained DenseNet-121 to extract chest-X-ray features. A
+separately trained U-Net supplies a coarse lung ROI, and bounding-box
+annotations are aggregated into one static spatial prior per disease.
+APEX-Net runs two class-specific APAM attention branches per finding, one
+conditioned on the lung mask and one on that finding's prior. It concatenates
+those branch features and predicts 14 independent logits, converted with
+sigmoid to ranking scores. A separate backend Grad-CAM procedure combines
+the two branch explanations with the disease prior and softly overlays the
+result within the lung ROI. These scores are not calibrated diagnostic
+probabilities, and the heatmaps are not lesion boundaries."
